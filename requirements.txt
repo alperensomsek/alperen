@@ -1,0 +1,8 @@
+patchright
+fastembed
+numpy
+fpdf2
+pypdf
+cryptography
+requests
+python-dotenv

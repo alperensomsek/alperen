@@ -1,0 +1,10 @@
+.env
+__pycache__/
+.pytest_cache/
+.state-*.json
+.models/
+.browser-profile/
+output/
+logs/
+state.json
+sent_messages.txt
