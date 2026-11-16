@@ -1,0 +1,93 @@
+name: ALgpt Daily Jobs
+
+# PUBLIC repo için tasarlandı: public repolarda GitHub Actions dakikası sınırsızdır.
+# Gizli bilgiler Secrets'ta, hafıza (state.json.enc) STATE_KEY ile şifreli.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * *'    # 05:17 UTC (~06:17/07:17 Varşova). Tam saat başları GitHub'da gecikir, bu yüzden :17
+
+permissions:
+  contents: write           # state.json.enc'i repoya geri yazmak için
+
+concurrency:
+  group: job-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330    # GitHub tek iş sınırı 360 dk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "$STATE_KEY" ] || [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error::STATE_KEY ve TELEGRAM_BOT_TOKEN secret'ları gerekli (README > GitHub kurulumu)."
+            exit 1
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          sudo apt-get install -y -qq xvfb fonts-dejavu-core > /dev/null
+          command -v google-chrome || python -m patchright install --with-deps chrome
+
+      - name: Cache AI model and browser profile
+        uses: actions/cache@v4
+        with:
+          path: |
+            .models
+            .browser-profile
+          key: algpt-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: algpt-${{ runner.os }}-
+
+      - name: Run ALgpt
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATE_KEY: ${{ secrets.STATE_KEY }}
+          CANDIDATE_EMAIL: ${{ secrets.CANDIDATE_EMAIL }}
+          CANDIDATE_PHONE: ${{ secrets.CANDIDATE_PHONE }}
+          CANDIDATE_LINKEDIN: ${{ secrets.CANDIDATE_LINKEDIN }}
+          PYTHONUNBUFFERED: '1'
+          HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+        # Chrome görünür modda (Cloudflare için) sanal ekranda çalışır. Tarama 240 dk'da durur,
+        # kaldığı link şifreli hafızaya yazılır; ardından bulunan tüm ilanlar mektuplarıyla gönderilir.
+        run: xvfb-run -a --server-args="-screen 0 1366x900x24" python main.py --max-minutes 240
+
+      - name: Commit memory (state.json.enc)
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f state.json.enc ] && git add state.json.enc
+          if git diff --staged --quiet; then
+            echo "Hafızada değişiklik yok."
+          else
+            git commit -m "chore: update job memory [skip ci]"
+            git pull --rebase --autostash || true
+            git push
+          fi
+
+      # Bir şey ters giderse sessizce durmasın: Telegram'a haber ver.
+      - name: Notify failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=⚠️ ALgpt günlük çalışması hata verdi: ${RUN_URL}" > /dev/null || true
