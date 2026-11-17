@@ -11,7 +11,7 @@ scraper.py (gerçek Chrome, sayfalama)  →  analyzer.py (eleme)  →  matcher.p
 ## Nasıl çalışır
 
 **1. Tarama** ([scraper.py](scraper.py))
-- 14 klasörü (turkish → operations → … → last 24 hours) Word sırasıyla gezer. Süre dolarsa kaldığı link şifreli hafızaya yazılır ve ertesi gün oradan devam eder.
+- 15 klasörü (turkish → operations → … → last 24 hours → companies) Word sırasıyla gezer. Süre dolarsa kaldığı link şifreli hafızaya yazılır ve ertesi gün oradan devam eder.
 - **Sayfalama:** her aramada sonuç sayfalarını tek tek geçer. Yöntemler 14.11.2026'da canlı test edildi:
 
 | Site | Yöntem | Test sonucu |
@@ -28,6 +28,11 @@ scraper.py (gerçek Chrome, sayfalama)  →  analyzer.py (eleme)  →  matcher.p
 | Indeed | yalnızca 1. sayfa | 2. sayfa giriş istiyor |
 | RocketJobs | yalnızca ~50 ilan | sayfa yok |
 
+- **Şirket kariyer sayfaları** ([company_sites.py](company_sites.py)): ~200 şirketin kendi kariyer sayfası (Google, Microsoft, Allegro, bankalar, Big4, FMCG, ilaç, lojistik…) `companies` klasöründe, en sonda taranır.
+  - Her site farklı bir altyapı kullandığı için (Workday, Oracle HCM, Phenom, SuccessFactors, Taleo, Eightfold, SmartRecruiters, Greenhouse, Lever, Ashby) site başına seçici yerine **genel ilan linki algılayıcısı** kullanılır. Gömülü iframe'ler de taranır.
+  - **Konum kapısı:** bazı sitelerin URL'deki konum filtresi çalışmıyor. Kartında açıkça yurt dışı yazan ilanların detayı açılmaz. Detayda Polonya'ya (ya da Avrupa geneli uzaktan çalışmaya) dair kanıt yoksa ilan atlanır. Sağlık raporunda "yurtdışı" sütunu.
+  - Şirket sitelerinde en fazla `COMPANY_MAX_PAGES` (3) sayfa gezilir. Yeni şirket eklemek için listeye bir `(ad, url)` satırı yeterli.
+  - Bilinen bir sitenin seçicisi hiç ilan bulamazsa (site yapısı değişmişse) genel algılayıcı yedek olarak devreye girer.
 - **Durma koşulları:** yeni ilan çıkmayınca, üst üste 2 sayfanın tamamı önceki günlerde görülmüşse ya da `MAX_PAGES` (10) dolunca durur. İlk çalışma derine iner, sonraki günler sadece yeni ilanlara kadar gider.
 - Kaydırırken kartlar biriktirilerek toplanır. Kaydırdıkça eski kartları silen listelerde de ilan kaçmaz.
 - **Engel aşma:** `patchright` + gerçek Google Chrome + görünür pencere (ekran dışında, sunucuda sanal ekranda).
@@ -47,12 +52,15 @@ scraper.py (gerçek Chrome, sayfalama)  →  analyzer.py (eleme)  →  matcher.p
 
 **4. İlana özel cover letter** ([letters.py](letters.py))
 - **Dosya adı:** `alperen-simsek-compliance-analyst-financial-crime-letter.pdf`. Her ilan ayrı klasörde üretilir, aynı isimli pozisyonlar çakışmaz.
-- **ATS uyumu:** gerçek metin PDF, standart font, tek sütun. Pozisyon ve şirket adı birebir geçer, ilanın anahtar becerileri metinde yer alır. PDF meta verisinde başlık, konu ve anahtar kelimeler bulunur.
-- **İşe alımcı için:**
-  - ALgpt'nin kendini tanıttığı bir giriş.
-  - **"Your requirements, his evidence"** bölümü: model ilan metninden şart cümlelerini çıkarır, CV'ne en çok benzeyen 2-3 tanesini **birebir alıntılar** ve her birinin altına CV'den kanıtı yazar.
-  - Gerçek puan ve eşleşen becerilerle bir **ALgpt Match Report** kutusu ve referans numarası.
-- Her iddia [profile_data.py](profile_data.py)'den (CV) gelir. Uydurma beceri ya da rakam yoktur.
+- **ATS uyumu:** gerçek metin PDF, standart font, tek sütun, tek sayfa. Pozisyon ve şirket adı birebir geçer. PDF meta verisinde başlık, konu ve anahtar kelimeler bulunur.
+- **Kendi ağzından:** mektup birinci şahısla yazılır ve senin imzanı taşır. Bot adı, puan, "match report" kutusu ve teknik terimler (Playwright, model adı) yoktur.
+- **Sıralama:** ilk paragraf ilk elemeden geçiren bilgilerle başlar: anadil Türkçe (ilan Türkçe istiyorsa), C1 İngilizce, çalışma izni gerekmiyor, Amazon'da 2 yıl compliance.
+- **Dürüst açık:** başlıktaki ana alan CV'nde yoksa (payroll, accounting, sales…) mektup bunu açıkça söyler ve aktarılabilir deneyimi gösterir. O alanla ilgili şartlar zayıf bir kanıtla eşleştirilmez. Bu ilanların puanı da 72 ile sınırlanır (Telegram'da "no direct payroll experience" yazar).
+- **Şartınız → deneyimim:** model ilandan şart cümlelerini çıkarır ("is a plus" maddeleri hariç), CV'ne yeterince benzeyen 2-3 tanesini alıntılar ve altına birinci şahısla kanıtı yazar. Kanıt yoksa şart yazılmaz.
+- **Beceri sayısı:** puan yerine sayılan şey yazılır: "I already work with six of the eight skills you list".
+- **İnsan yazısı gibi:** B2 düzeyinde sade İngilizce. Cümleler ilandan ilana değişir. Üretimden sonra PDF'te yapay zekâ metinlerine özgü kalıplar (delve, passionate, leverage, furthermore…) aranır, bulunursa konsola uyarı yazılır.
+- İş arama aracın sona yakın tek cümleyle anılır.
+- Her iddia [profile_data.py](profile_data.py)'den (CV) gelir (`EVIDENCE_FIRST`). Uydurma beceri ya da rakam yoktur. **Göndermeden önce her mektubu oku:** imza senin.
 
 ## Online kurulum: GitHub Actions (public repo, ücretsiz ve sınırsız)
 
@@ -67,6 +75,7 @@ Public repolarda GitHub Actions dakikası **sınırsızdır** ve tek iş 6 saate
    | `TELEGRAM_CHAT_ID` | sohbet ID'n |
    | `STATE_KEY` | yereldeki `.env` dosyasındaki `STATE_KEY` değeri (**aynısı** olmalı, yoksa hafıza açılmaz) |
    | `CANDIDATE_EMAIL` / `CANDIDATE_PHONE` / `CANDIDATE_LINKEDIN` | mektup başlığındaki iletişim bilgileri |
+   | `CANDIDATE_GITHUB` (isteğe bağlı) | varsayılan: github.com/alperenosmansimsek |
 
 3. *Actions* sekmesinde **ALgpt Daily Jobs → Run workflow** ile ilk testi yap. Sonra her gün 05:17 UTC'de kendiliğinden çalışır.
 

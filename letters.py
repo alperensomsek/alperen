@@ -1,14 +1,19 @@
-"""ALgpt imzalı, ilana özel cover letter (PDF).
+"""İlana özel cover letter (PDF), Alperen'in kendi ağzından.
 
-Hedef: hem ATS'den geçsin hem işe alımcının dikkatini çeksin.
-  ATS:      gerçek metin PDF, standart font, tek sütun; pozisyon ve şirket adı birebir; ilanın
-            anahtar becerileri metinde; PDF meta verisinde başlık/konu/anahtar kelimeler.
-            Üretimden sonra PDF metni bir ATS gibi okunup doğrulanır (verify_letter_pdf).
-  İnsan:    ilandan birebir alıntılanan şartlar + her birinin altında CV'den kanıt,
-            gerçek puanla "ALgpt Match Report" kutusu.
-Yazım kuralları (ai-job-search / 03-writing-style.md'den uyarlandı):
-  250-300 kelime gövde, tek sayfa (zorunlu), uzun tire yok, klişe yok, ileriye dönük cümle,
-  başlık = pozisyon + ilandan anahtar kelime. Her iddia profile_data.py'den (CV) gelir.
+Kurallar (ALPEREN_COVER_LETTER_FEEDBACK.md'ye göre):
+  * Birinci tekil şahıs, Alperen imzalı. Asistan/bot, puan, "match report" kutusu, teknik terim
+    (Playwright, model adı...) YOK.
+  * İlk paragraf ilk eleme filtresini geçirenle başlar: anadil Türkçe (ilan Türkçe istiyorsa),
+    C1 İngilizce, çalışma izni gerekmiyor, Amazon'da 2 yıl compliance.
+  * Başlıktaki ana alan CV'de yoksa (ör. payroll) bu açıkça söylenir; o alanla ilgili şartlar
+    zayıf kanıtla eşleştirilmez, aktarılabilir deneyim gösterilir.
+  * "Şartınız → deneyimim" düzeni korunur; kanıt yoksa şart hiç yazılmaz.
+  * Kendi yaptığı iş arama aracı yalnızca bir cümleyle, sona yakın anılır.
+  * B2 seviyesinde sade İngilizce; ilanlar arasında cümleler değişir (hepsi aynı şablon gibi
+    görünmesin); yapay zekâ metinlerine özgü kalıp ifadeler (delve, passionate, leverage...)
+    üretimden sonra PDF'te aranır.
+ATS: gerçek metin PDF, standart font, tek sütun, tek sayfa; pozisyon ve şirket adı birebir;
+eşleşen beceriler metinde; PDF meta verisi dolu. Her iddia profile_data.py'den (CV) gelir.
 """
 from __future__ import annotations
 
@@ -19,11 +24,12 @@ import unicodedata
 from datetime import date
 
 import profile_data as P
+from matcher import domain_gap, gap_pattern
 
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output", "letters")
 ACCENT = (23, 92, 168)
 MUTED = (95, 95, 95)
-MAX_BODY_WORDS = 320  # başlık/iletişim/rapor kutusu hariç gövde
+MAX_BODY_WORDS = 320  # başlık/iletişim hariç gövde
 
 FONT_CANDIDATES = [
     ("C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/arialbd.ttf", "C:/Windows/Fonts/ariali.ttf"),
@@ -41,20 +47,31 @@ SITE_NAMES = {
     "randstad": "Randstad", "devire": "Devire", "careersinpoland": "Careers in Poland",
     "europelanguagejobs": "Europe Language Jobs", "bulldogjob": "Bulldogjob", "hiringcafe": "HiringCafe",
 }
-OWN_SITES = {"amazon", "revolut", "ikea"}  # şirketin kendi kariyer sayfası
+OWN_SITES = {"amazon", "revolut", "ikea"}  # şirketin kendi kariyer sayfası (eski klasörler)
 
-PRETTY = {"sql": "SQL", "vba": "VBA", "kpi": "KPI", "sla": "SLA", "capa": "CAPA", "aws": "AWS", "sop": "SOPs",
-          "power bi": "Power BI", "power query": "Power Query", "powerapps": "PowerApps", "javascript": "JavaScript",
+PRETTY = {"sql": "SQL", "vba": "VBA", "sop": "SOPs", "fastapi": "FastAPI", "databricks": "Databricks", "etl": "ETL",
+          "ci/cd": "CI/CD", "vs code": "VS Code", "github": "GitHub", "android studio": "Android Studio",
+          "claude code": "Claude Code", "chatgpt": "ChatGPT", "claude": "Claude",
+          "power bi": "Power BI", "javascript": "JavaScript",
           "html": "HTML", "css": "CSS", "git": "Git", "jira": "Jira", "python": "Python", "excel": "Excel",
           "kotlin": "Kotlin", "llm": "LLMs", "ai": "AI", "kanban": "Kanban", "agile": "Agile", "lean": "Lean",
-          "root cause analysis": "Root Cause Analysis", "compliance": "compliance", "audit": "audit"}
-# İleriye dönük cümlede kullanılabilecek görev cümleleri bu fiillerle başlamalı.
-TASK_VERB = re.compile(r"^(analy[sz]|monitor|prepar|support|improv|develop|manag|coordinat|perform|ensur|build|"
-                       r"creat|maintain|conduct|review|identify|deliver|automat|investigat|assess|track|report|"
-                       r"design|implement|optimi[sz]|handl|own|lead|drive|work)\w*\b", re.I)
-HEADLINE_PRIORITY = ["Python", "SQL", "Power BI", "Excel", "VBA", "JavaScript", "AWS", "Root Cause Analysis", "CAPA",
-                     "KPI", "Jira", "Git", "Kotlin", "audit", "compliance"]
-CLICHES = re.compile(r"passionate|hit the ground running|leverage my|synerg|team player|go-getter|think outside", re.I)
+          "root cause analysis": "root cause analysis", "compliance": "compliance", "audit": "audit"}
+TOOLS_FIRST = ["Python", "SQL", "Power BI", "Excel", "VBA", "ETL", "Databricks", "FastAPI", "JavaScript", "Kotlin",
+               "Jira", "Git", "root cause analysis", "audit", "compliance"]
+# Teknik rollerde araç biraz daha açık anlatılır; diğerlerinde tek cümle.
+TECH_ROLE = re.compile(r"\b(data|analyst|analytics|automation|developer|engineer|python|software|programmer|"
+                       r"bi|ai|machine learning|qa|test\w*)\b", re.I)
+CLICHES = re.compile(r"passionate|hit the ground running|leverag|synerg|team player|go-getter|think outside", re.I)
+# Yapay zekâ metinlerinde sık görülen, insan yazısında nadir kalıplar. Mektupta hiçbiri olmamalı.
+AI_TELLS = re.compile(
+    r"\bdelv\w*|\bthrilled\b|\bexcited to\b|\beager to\b|\bdynamic\b|fast-paced|\bfurthermore\b|\bmoreover\b|"
+    r"\badditionally\b|i am confident|\bseamless\w*|\brobust\b|\btestament\b|\bspearhead\w*|\bhoned\b|\brealm\b|"
+    r"\btapestry\b|cutting-edge|\bunwavering\b|in today's|\bjourney\b|\binvaluable\b|\bmeticulous\w*|"
+    r"\bnavigat\w* the\b|\bfoster\w*\b|\bempower\w*\b|\bholistic\b|\bplethora\b|\bkeen interest\b|"
+    r"\bperfect fit\b|\bideal candidate\b|\buniquely\b|\bsynergy\b|\bstrive\b|\bwell-versed\b",
+    re.I)
+NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+                "twelve"]
 
 
 def _clean_company(company: str) -> str:
@@ -69,6 +86,10 @@ def _join(items: list) -> str:
     return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
 
 
+def _num(n: int) -> str:
+    return NUMBER_WORDS[n] if 0 <= n < len(NUMBER_WORDS) else str(n)
+
+
 def _slug(s: str, n: int = 60) -> str:
     s = unicodedata.normalize("NFKD", (s or "").replace("ł", "l").replace("Ł", "L")).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:n].strip("-")
@@ -81,8 +102,9 @@ def letter_filename(job: dict) -> str:
 
 
 def reference_id(job: dict) -> str:
+    """Yalnızca klasör adı için (aynı isimli pozisyonlar çakışmasın); mektupta görünmez."""
     h = hashlib.sha1(f"{job.get('url')}|{job.get('title')}".encode()).hexdigest()[:6].upper()
-    return f"ALgpt-{date.today():%Y%m%d}-{h}"
+    return f"{date.today():%Y%m%d}-{h}"
 
 
 EMOJI_RE = re.compile("[🀀-🫿☀-➿️‍⬀-⯿]")
@@ -94,68 +116,157 @@ def _strip_emoji(text: str) -> str:
 
 
 def _no_dashes(text: str) -> str:
-    """Yazım kuralı: uzun tire yok (virgül/nokta ile değiştir)."""
+    """Yazım kuralı: uzun tire yok (virgül ile değiştir)."""
     return re.sub(r"\s*[—–]\s*", ", ", text)
+
+
+def _where(job: dict) -> str:
+    site = (job.get("site") or "").lower()
+    if job.get("company_site") or site in OWN_SITES:
+        return "on your careers page"
+    return f"on {SITE_NAMES[site]}" if site in SITE_NAMES else ""
+
+
+def _short_quote(text: str, limit: int = 115) -> str:
+    """İlandan alıntı: uzunsa kelime sınırında kısalt (uzun alıntı şablon gibi görünür)."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "..."
 
 
 def build_letter(job: dict, result: dict, matcher=None) -> dict:
     company = _strip_emoji(_clean_company(job.get("company")))
     role = _strip_emoji(job.get("title") or "") or "this position"
-    site = (job.get("site") or "").lower()
-    where = "on your careers website" if site in OWN_SITES else f"on {SITE_NAMES.get(site, 'a job board')}"
-    score = result.get("match_score", 0)
-    matched = [PRETTY.get(s, s) for s in result.get("matched_skills", [])][:8]
+    at = f" at {company}" if company else ""
+    where = _where(job)
+    matched = [PRETTY.get(s, s) for s in result.get("matched_skills", [])]
+    matched = sorted(matched, key=lambda m: TOOLS_FIRST.index(m) if m in TOOLS_FIRST else 99)[:8]
     total = result.get("skill_total", 0)
     turkish = bool(re.search(r"\bturkish\b", f"{role} {job.get('description', '')}", re.I))
+    gap = result.get("gap") or domain_gap(role)
+    tech = bool(TECH_ROLE.search(role)) and not gap
 
-    pairs = matcher.match_requirements(job) if matcher else []
+    # Aynı ilan hep aynı mektubu alır; farklı ilanlar farklı cümle kombinasyonları.
+    seed = int(hashlib.sha1(f"{job.get('url')}|{role}".encode()).hexdigest(), 16)
+
+    def pick(options: list, slot: int) -> str:
+        return options[(seed >> (slot * 5)) % len(options)]
+
+    # 1) Açılış: pozisyon + ilk filtreyi geçirenler
+    first = pick([
+        f"I am applying for the {role} position{at}" + (f", which I found {where}" if where else "") + ".",
+        f"I would like to apply for the {role} role{at}" + (f" that I saw {where}" if where else "") + ".",
+        f"I'm writing to apply for the {role} job{at}" + (f", which I came across {where}" if where else "") + ".",
+    ], 0)
+    amazon = pick([
+        "I spent two years at Amazon Corporate Services Poland as a Compliance Associate, checking products "
+        "against EMEA and US regulations and safety standards, so accuracy was part of my daily work.",
+        "I worked for two years at Amazon Corporate Services Poland as a Compliance Associate. I reviewed "
+        "products against EMEA and US rules every day, and getting the details right was a normal part of "
+        "the job.",
+    ], 1)
+    if turkish:
+        langs = pick([
+            "I'm a native Turkish speaker with C1 English, and I don't need a work permit in Poland.",
+            "Turkish is my native language, my English is at C1 level, and I can work in Poland without a "
+            "work permit.",
+        ], 2)
+        opening = f"{first} {langs} {amazon}"
+    else:
+        langs = pick([
+            "My English is at C1 level, Turkish is my native language, and I don't need a work permit in Poland.",
+            "I speak English at C1 level and I can work in Poland without a work permit, as I graduated from a "
+            "Polish university.",
+        ], 2)
+        opening = f"{first} {amazon} {langs}"
+
+    # 2) Şartlar → kanıt (CV'nin cevaplayamadığı alan şartları atlanır)
+    pairs = matcher.match_requirements(job, skip=gap_pattern(gap)) if matcher else []
     achievements = []
-    if len(pairs) < 2 and matcher is not None:  # kısa ilan / kart-only: en uygun CV başarıları
-        _, vec = matcher.semantic(job)
-        achievements = matcher.best_achievements(vec, n=3)
+    if len(pairs) < 2:
+        pairs = []
+        if matcher is not None:
+            _, vec = matcher.semantic(job)
+            idx = [P.ACHIEVEMENTS.index(a) for a in matcher.best_achievements(vec, n=3)]
+        else:
+            idx = [0, 1, 2]
+        achievements = [P.EVIDENCE_FIRST[i] for i in idx]
 
-    # Başlık formülü: [eğitim/deneyim] + ilandan anahtar kelime (önce somut araçlar: ATS bunları arar)
-    tools_first = sorted(matched, key=lambda m: (HEADLINE_PRIORITY.index(m) if m in HEADLINE_PRIORITY else 99))
-    keywords = _join(tools_first[:2]) if matched else "process automation"
-    headline = f"MSc Computer Science, 2 years in compliance at Amazon, hands-on with {keywords}"
+    if gap:
+        lead_in = pick([
+            f"I have not worked in {gap} before, and I want to be clear about that. What I do bring is the work "
+            f"around it:",
+            f"To be honest, I haven't worked in {gap} yet. A lot of what this role needs, though, is close to what "
+            f"I did every day:",
+            f"I should say openly that I have no direct {gap} experience. Here is what I can bring instead:",
+        ], 3)
+    elif pairs:
+        lead_in = pick([
+            "Here is how my experience matches what you are looking for:",
+            "A few points from your posting, and what I have done in each area:",
+            "Looking at your requirements, this is where my experience fits:",
+        ], 3)
+    else:
+        lead_in = pick([
+            "A few things I have done that are relevant here:",
+            "Some examples of my work that fit this role:",
+        ], 3)
 
-    intro = (
-        f"I am {P.ASSISTANT_NAME}, the AI job-search assistant {P.NAME} built himself. Each day I scan Polish job "
-        f"boards, read every new posting and score it against his CV with an offline AI model. Your {role} role, "
-        f"which I found {where}, scored {score}/100: one of the strongest matches I have found for him. "
-        f"I wrote this letter for your posting specifically; Alperen reviews and sends it himself."
-    )
-    skills = (f"Of the {total} skills your posting lists, he brings {len(matched)}: {_join(matched)}."
-              if total >= 2 and matched else
-              (f"The skills this role relies on are ones he uses daily: {_join(matched)}." if matched else ""))
-    background = ("He holds an MSc in Computer Science (Warsaw) and a BSc in Mathematics, speaks English (C1) and "
-                  "Turkish (native), and is exempt from the Polish work-permit requirement."
-                  + (" His native Turkish covers the language requirement of this role." if turkish else ""))
-    # İleriye dönük: yukarıda gösterilmeyen bir görev cümlesine bağla (fiille başlıyorsa, dilbilgisi bozulmasın).
-    shown = {q for q, _ in pairs}
-    task = matcher.best_task(job, shown, TASK_VERB) if matcher else ""
-    forward = (f"In this role he would bring the same approach to {task[0].lower() + task[1:]}: find the manual, "
-               f"repetitive work, build the tool that removes it and measure the result."
-               if task else
-               "In this role he would bring the same approach: find the manual, repetitive work, build the tool "
-               "that removes it and measure the result.")
-    closing = (f"Someone who designs an assistant like me to run his own job search will bring that instinct to "
-               f"{company or 'your team'}. He would welcome a short call about how he can contribute.")
+    # 3) Beceri sayısı: puan yerine sayılan şeyin kendisi ("8 beceriden 6'sı")
+    skills = ""
+    if total >= 4 and len(matched) >= 2 and len(matched) / total >= 0.4:
+        top = _join(matched[:3])
+        skills = pick([
+            f"From the skills and tools in your posting, I already use {_num(len(matched))} of the {_num(total)} "
+            f"in my work, including {top}.",
+            f"I already work with {_num(len(matched))} of the {_num(total)} skills you list, for example {top}.",
+        ], 4)
+
+    # 4) Eğitim + araç (tek cümle, sona yakın)
+    edu = pick([f"I hold {P.EDUCATION}.", f"I have {P.EDUCATION}."], 5)
+    tool = pick([
+        "Outside work I keep building small tools in Python, and one of them is the job-search assistant that "
+        "found this posting for me.",
+        "I like to automate my own routine too: I found this posting with a small job-search tool I wrote myself.",
+    ] if tech else [
+        "I tend to notice repetitive work and build something that removes it. I even found this role with a "
+        "job-search assistant I built myself.",
+        "I like finding repetitive tasks and making them simpler, and I found this role with a small job-search "
+        "tool I built myself.",
+    ], 6)
+    background = f"{edu} {tool}"
+
+    closing = pick([
+        "I would welcome a short call to talk about the role. Thank you for your time.",
+        "I'd be glad to discuss the role in a short call. Thank you for reading my application.",
+        f"If you think my background could help {company or 'your team'}, I would be happy to talk. Thank you for "
+        f"your time.",
+    ], 7)
+
     L = {
-        "company": company, "role": role, "score": score, "matched": matched, "total": total,
-        "headline": headline,
-        "greeting": f"Dear {company} Hiring Team," if company else "Dear Hiring Team,",
-        "intro": intro, "pairs": pairs, "achievements": achievements, "skills": skills,
-        "background": background, "forward": forward, "closing": closing, "ref": reference_id(job),
+        "company": company, "role": role, "matched": matched, "total": total, "gap": gap, "turkish": turkish,
+        "greeting": f"Dear {company} Hiring Team," if company else "Dear Hiring Manager,",
+        "opening": opening, "lead_in": lead_in, "pairs": pairs, "achievements": achievements,
+        "skills": skills, "background": background, "closing": closing, "ref": reference_id(job),
     }
-    for k in ("headline", "intro", "skills", "background", "forward", "closing"):
+    for k in ("opening", "lead_in", "skills", "background", "closing"):
         L[k] = _no_dashes(L[k])
+    L["pairs"] = [(q, _no_dashes(e)) for q, e in L["pairs"]]
     return L
 
 
+def letter_text(L: dict) -> str:
+    """Mektubun düz metni (kontroller ve testler için)."""
+    parts = [L["greeting"], L["opening"], L["lead_in"]]
+    parts += [f'"{_short_quote(q)}" {e}' for q, e in L["pairs"]] + L["achievements"]
+    parts += [L["skills"], L["background"], L["closing"], "Kind regards,", P.NAME]
+    return "\n".join(p for p in parts if p)
+
+
 def body_word_count(L: dict) -> int:
-    parts = [L["intro"], L["skills"], L["background"], L["forward"], L["closing"]]
-    parts += [q + " " + e for q, e in L["pairs"]] + L["achievements"]
+    parts = [L["opening"], L["lead_in"], L["skills"], L["background"], L["closing"]]
+    parts += [_short_quote(q) + " " + e for q, e in L["pairs"]] + L["achievements"]
     return sum(len(p.split()) for p in parts if p)
 
 
@@ -170,13 +281,13 @@ def _render(L: dict, scale: float):
     from fpdf import FPDF
 
     pdf = FPDF(format="A4")
-    pdf.set_margins(20, 15, 20)
+    pdf.set_margins(22, 16, 22)
     pdf.set_auto_page_break(True, margin=12)
     pdf.set_title(f"Cover Letter - {L['role']}" + (f" - {L['company']}" if L["company"] else ""))
     pdf.set_author(P.NAME)
     pdf.set_subject(f"Application for {L['role']}")
     pdf.set_keywords(", ".join([L["role"], L["company"]] + L["matched"] + ["cover letter", P.NAME]))
-    pdf.set_creator(f"{P.ASSISTANT_NAME} (Python, offline AI)")
+    pdf.set_creator(P.NAME)
     pdf.add_page()
 
     font, conv, has_italic = "helvetica", _ascii, True
@@ -193,7 +304,7 @@ def _render(L: dict, scale: float):
     w = pdf.epw
     s = scale
 
-    def para(text, size=10, style="", color=(0, 0, 0), lh=5.0, after=2.2, indent=0):
+    def para(text, size=10.5, style="", color=(0, 0, 0), lh=5.3, after=2.6, indent=0):
         if not text:
             return
         pdf.set_font(font, style, size * s)
@@ -202,78 +313,50 @@ def _render(L: dict, scale: float):
         pdf.multi_cell(w - indent, lh * s, conv(text), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(after * s)
 
-    # Başlık
-    pdf.set_font(font, "B", 20 * s)
+    # Başlık: ad + iletişim
+    pdf.set_font(font, "B", 19 * s)
     pdf.set_text_color(*ACCENT)
     pdf.cell(w, 9 * s, conv(P.NAME), new_x="LMARGIN", new_y="NEXT")
-    para("  |  ".join(x for x in [P.LOCATION, P.EMAIL, P.PHONE, P.LINKEDIN] if x), size=8.8, color=MUTED,
+    para("  |  ".join(x for x in [P.LOCATION, P.EMAIL, P.PHONE, P.LINKEDIN, P.GITHUB] if x), size=8.6, color=MUTED,
          lh=4.5, after=0.5)
     pdf.set_draw_color(*ACCENT)
-    pdf.set_line_width(0.6)
+    pdf.set_line_width(0.5)
     pdf.line(pdf.l_margin, pdf.get_y() + 1, pdf.l_margin + w, pdf.get_y() + 1)
-    pdf.ln(4 * s)
+    pdf.ln(5 * s)
 
-    para(f"{date.today():%d %B %Y}   ·   Ref: {L['ref']}", size=8.8, color=MUTED, lh=4.5, after=1.2)
-    para(f"Application: {L['role']}" + (f" at {L['company']}" if L["company"] else ""), size=12, style="B",
-         lh=6, after=0.4)
-    para(L["headline"], size=9.5, style=italic, color=ACCENT, lh=4.8, after=2.4)
-    para(L["greeting"], size=10)
-    para(L["intro"], size=10)
+    para(f"{date.today():%d %B %Y}", size=9.5, color=MUTED, lh=4.6, after=2.0)
+    para(f"Application for {L['role']}" + (f", {L['company']}" if L["company"] else ""), size=11.5, style="B",
+         lh=6, after=3.0)
+    para(L["greeting"])
+    para(L["opening"])
+    para(L["lead_in"], after=1.8)
 
-    if len(L["pairs"]) >= 2:
-        para("Your requirements, his evidence", size=10.5, style="B", color=ACCENT, lh=5.5, after=1.2)
+    if L["pairs"]:
         for req, ev in L["pairs"]:
             y0 = pdf.get_y()
-            para(f"\u201c{req}\u201d" if conv is not _ascii else f'"{req}"', size=9.3, style=italic,
-                 color=MUTED, lh=4.6, after=0.6, indent=5)
-            para(f"\u2192 {ev}" if conv is not _ascii else f"-> {ev}", size=9.6, lh=4.8, after=2.0, indent=5)
+            q = _short_quote(req)
+            para(f"\u201c{q}\u201d" if conv is not _ascii else f'"{q}"', size=9.6, style=italic,
+                 color=MUTED, lh=4.7, after=0.6, indent=5)
+            para(ev, size=10.2, lh=5.0, after=2.2, indent=5)
             pdf.set_draw_color(*ACCENT)
-            pdf.set_line_width(0.8)
-            pdf.line(pdf.l_margin + 1.5, y0 + 0.5, pdf.l_margin + 1.5, pdf.get_y() - 2.0 * s)
+            pdf.set_line_width(0.7)
+            pdf.line(pdf.l_margin + 1.5, y0 + 0.5, pdf.l_margin + 1.5, pdf.get_y() - 2.2 * s)
     else:
-        para("What he has already delivered", size=10.5, style="B", color=ACCENT, lh=5.5, after=1.2)
         for a in L["achievements"]:
-            para(("\u2022 " if conv is not _ascii else "- ") + a, size=9.6, lh=4.8, after=1.2, indent=4)
+            para(("\u2022 " if conv is not _ascii else "- ") + a, size=10.2, lh=5.0, after=1.6, indent=4)
         pdf.ln(0.8 * s)
 
-    para(L["skills"], size=10)
-    para(L["background"], size=10)
-    para(L["forward"] + " " + L["closing"], size=10)
+    para(L["skills"])
+    para(L["background"])
+    para(L["closing"], after=4)
 
-    para("Kind regards,", size=10, after=0.5)
-    para(f"{P.ASSISTANT_NAME}, on behalf of {P.NAME}", size=10, style="B", after=3)
-
-    # ALgpt Match Report kutusu
-    box_h = 16 * s
-    x0, y0 = pdf.l_margin, pdf.get_y()
-    pdf.set_fill_color(240, 245, 252)
-    pdf.set_draw_color(*ACCENT)
-    pdf.set_line_width(0.3)
-    pdf.rect(x0, y0, w, box_h, style="DF")
-    pdf.set_xy(x0 + 4, y0 + 2.5 * s)
-    pdf.set_font(font, "B", 9 * s)
-    pdf.set_text_color(*ACCENT)
-    pdf.cell(60, 4.5 * s, conv(f"{P.ASSISTANT_NAME} MATCH REPORT"))
-    bar_x, bar_w = x0 + 62, 60
-    pdf.set_fill_color(210, 220, 235)
-    pdf.rect(bar_x, y0 + 3 * s, bar_w, 3.2 * s, style="F")
-    pdf.set_fill_color(*ACCENT)
-    pdf.rect(bar_x, y0 + 3 * s, bar_w * L["score"] / 100, 3.2 * s, style="F")
-    pdf.set_xy(bar_x + bar_w + 3, y0 + 2.5 * s)
-    pdf.cell(30, 4.5 * s, conv(f"{L['score']}/100"))
-    pdf.set_xy(x0 + 4, y0 + 8 * s)
-    pdf.set_font(font, "", 8 * s)
-    pdf.set_text_color(*MUTED)
-    skills_line = (f"Skills matched: {len(L['matched'])}/{L['total']} ({', '.join(L['matched'])})"
-                   if L["total"] >= 2 and L["matched"] else "Scored on role fit, skills and seniority")
-    pdf.multi_cell(w - 8, 3.8 * s, conv(
-        f"{skills_line}. Generated for this posting by {P.ASSISTANT_NAME}, a Python pipeline (Playwright, offline "
-        f"embedding model) that Alperen built. Every statement comes from his CV."), new_x="LMARGIN", new_y="NEXT")
+    para("Kind regards,", after=0.8)
+    para(P.NAME, style="B", after=0)
     return pdf
 
 
 def verify_letter_pdf(path: str, L: dict) -> list:
-    """PDF'i bir ATS gibi oku: tek sayfa mı, pozisyon/şirket/beceriler metinde okunuyor mu? Sorun listesi döner."""
+    """PDF'i bir ATS gibi oku: tek sayfa mı, pozisyon/şirket/beceriler okunuyor mu, yapay zekâ kalıbı var mı?"""
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -288,17 +371,22 @@ def verify_letter_pdf(path: str, L: dict) -> list:
     problems = []
     if len(reader.pages) != 1:
         problems.append(f"{len(reader.pages)} sayfa (1 olmalı)")
-    for label, needle in [("pozisyon", L["role"]), ("şirket", L["company"])] + [("beceri", m) for m in L["matched"][:5]]:
+    for label, needle in [("pozisyon", L["role"]), ("şirket", L["company"])]:
         if needle and fold(needle)[:40] not in text:
             problems.append(f"{label} metinde okunamıyor: {needle!r}")
     if CLICHES.search(text):
         problems.append("klişe ifade var")
+    m = AI_TELLS.search(text)
+    if m:
+        problems.append(f"yapay zekâ kalıbı: {m.group(0)!r}")
+    if re.search(r"algpt|/100\b|match report|playwright|bge-small", text):
+        problems.append("bot/puan/teknik detay mektupta görünüyor")
     return problems
 
 
 def write_letter_pdf(job: dict, result: dict, matcher=None, out_dir: str | None = None) -> str:
     L = build_letter(job, result, matcher)
-    # Kelime bütçesi: aşılırsa önce en uzun kanıt çiftini, sonra başarı maddesini çıkar.
+    # Kelime bütçesi: aşılırsa önce son kanıt çiftini, sonra başarı maddesini çıkar.
     while body_word_count(L) > MAX_BODY_WORDS and (len(L["pairs"]) > 2 or len(L["achievements"]) > 2):
         if len(L["pairs"]) > 2:
             L["pairs"] = L["pairs"][:-1]
@@ -318,5 +406,5 @@ def write_letter_pdf(job: dict, result: dict, matcher=None, out_dir: str | None 
     pdf.output(path)
     problems = verify_letter_pdf(path, L)
     if problems:
-        print(f"   ⚠️ Mektup ATS kontrolü ({os.path.basename(path)}): " + "; ".join(problems))
+        print(f"   ⚠️ Mektup kontrolü ({os.path.basename(path)}): " + "; ".join(problems))
     return path

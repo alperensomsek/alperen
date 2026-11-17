@@ -18,7 +18,7 @@ import random
 import re
 import time
 from collections import defaultdict
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 try:  # patchright: otomasyon izlerini gizleyen Playwright sürümü
     from patchright.sync_api import sync_playwright
@@ -27,8 +27,9 @@ except ImportError:  # pragma: no cover
     from playwright.sync_api import sync_playwright
     STEALTH = False
 
-from config import (BROWSER_CHANNEL, BROWSER_PROFILE_DIR, BROWSER_WINDOW, DISABLED_SITES, HEADLESS,
-                    LINKEDIN_MAX_PAGES, MAX_JOBS_PER_SITE, MAX_PAGES, REQUEST_DELAY,
+from company_sites import COMPANY_BY_URL, COMPANY_CAREER_SITES
+from config import (BROWSER_CHANNEL, BROWSER_PROFILE_DIR, BROWSER_WINDOW, COMPANY_MAX_PAGES, DISABLED_SITES,
+                    HEADLESS, LINKEDIN_MAX_PAGES, MAX_JOBS_PER_SITE, MAX_PAGES, REQUEST_DELAY,
                     STOP_AFTER_SEEN_PAGES)
 from state import canonical_url
 
@@ -50,6 +51,8 @@ def _strip_html(raw: str) -> str:
 
 
 def site_label(url: str) -> str:
+    if COMPANY_BY_URL.get(url):  # şirket kariyer sayfası: rapor ve Telegram'da şirket adıyla görünsün
+        return re.sub(r"[^a-z0-9]+", "", COMPANY_BY_URL[url].lower()) or "company"
     host = urlsplit(url).netloc.lower().replace("www.", "")
     parts = host.split(".")
     if len(parts) >= 3 and parts[0] in {"pl", "poland", "en", "jobs"}:
@@ -150,19 +153,29 @@ def _extract_json_ld(page) -> dict:
         org = posting.get("hiringOrganization") or {}
         if isinstance(org, list):
             org = org[0] if org else {}
-        loc = posting.get("jobLocation") or {}
-        if isinstance(loc, list):
-            loc = loc[0] if loc else {}
-        addr = loc.get("address", {}) if isinstance(loc, dict) else {}
-        city = addr.get("addressLocality", "") if isinstance(addr, dict) else ""
+        locs = posting.get("jobLocation") or []
+        locs = locs if isinstance(locs, list) else [locs]
+        places = []  # çok lokasyonlu ilanlarda hepsi (konum kapısı için)
+        for loc in locs:
+            addr = loc.get("address", {}) if isinstance(loc, dict) else {}
+            if isinstance(addr, dict):
+                country = addr.get("addressCountry") or ""
+                country = country.get("name", "") if isinstance(country, dict) else country
+                places.append(", ".join(str(x) for x in (addr.get("addressLocality"), addr.get("addressRegion"),
+                                                         country) if x))
+            elif isinstance(addr, str):
+                places.append(addr)
+        city = next((p.split(",")[0] for p in places if p), "")
         if str(posting.get("jobLocationType", "")).upper() == "TELECOMMUTE":
             city = f"{city} / Remote" if city else "Remote"
+            places.append("Remote")
         return {
             "title": html_lib.unescape(str(posting.get("title") or "")).strip(),
             "company": html_lib.unescape(str(org.get("name") if isinstance(org, dict) else org or "")).strip(),
             "city": str(city).strip(),
             "description": _strip_html(str(posting.get("description") or "")),
             "date_posted": str(posting.get("datePosted") or "")[:10],
+            "location": " | ".join(p for p in places if p),
         }
     return {}
 
@@ -269,6 +282,8 @@ def _read_detail(page, url: str, fallback_title: str) -> dict | None:
         "city": ld.get("city") or "Warsaw / Remote",
         "description": description,
         "date_posted": ld.get("date_posted", ""),
+        "location": ld.get("location", ""),
+        "company_from_ld": bool(ld.get("company")),
         "url": page.url if ("jobListing.htm" in url or "/rc/clk" in url) else url,
     }
 
@@ -353,11 +368,73 @@ PAGINATION = {
 }
 NEXT_BUTTONS = ["a[rel='next']", "a[data-testid='pagination-page-next']", "[data-test='pagination-next']",
                 "a[aria-label*='next page' i]", "button[aria-label*='next page' i]", "button:has-text('Load more')",
-                "button:has-text('Show more jobs')", "button:has-text('Pokaż więcej')"]
+                "button:has-text('Show more jobs')", "button:has-text('Pokaż więcej')",
+                # şirket kariyer altyapıları (Workday, Phenom, SuccessFactors, Radancy, Oracle HCM, Eightfold)
+                "button[aria-label='next' i]", "a[aria-label='View next page' i]", "a[title*='next page' i]",
+                "a.paginationItemLast", "a.next", "button:has-text('Show More Results')",
+                "button:has-text('Show more')", "button:has-text('More jobs')", "button:has-text('Load More Jobs')"]
+
+# ---------------------------------------------------------------------------
+# Şirket kariyer sayfaları (company_sites.py): site başına seçici yerine genel ilan-linki kalıbı.
+# Yaygın altyapıların ilan URL'leri: Workday /job/..., Oracle HCM /requisitions/preview/123,
+# Taleo jobdetail.ftl?job=, Eightfold /careers/job/123, SmartRecruiters /Firma/123456,
+# Greenhouse /jobs/123, Lever/Ashby /firma/<uuid>, Phenom/Radancy/SuccessFactors /job/<slug>/123
+# ---------------------------------------------------------------------------
+GENERIC_JOB_URL_RE = re.compile(r"""
+    /jobs?/(?:[\w%.-]+/){0,3}[^/?#]*\d{4,}
+  | /job/[^/?#]{8,}
+  | /requisitions/preview/\d+
+  | /job-invite/\d+
+  | jobdetail\.ftl\?job=
+  | /JobDetail/
+  | /careers/job/\d+
+  | /(?:positions?|vacanc(?:y|ies)|openings?|opportunit(?:y|ies)|postings?|offers?|oferta|oferty-pracy|praca|
+       job-offers?|job-details?|career/job|stellen)/[^/?#]*\d{3,}
+  | /(?:position|vacancy|job-offer|oferta-pracy|oferta|vacancies)/[a-z0-9-]{12,}
+  | [?&](?:jobid|job_id|gh_jid|jobreqid|reqid|requisitionid|ajid)=\w{3,}
+  | jobs\.ashbyhq\.com/[^/]+/[0-9a-f-]{20,}
+  | jobs\.lever\.co/[^/]+/[0-9a-f-]{20,}
+  | smartrecruiters\.com/[^/]+/\d{6,}
+  | greenhouse\.io/[^?#]*jobs/\d+
+""", re.I | re.X)
+GENERIC_SKIP_RE = re.compile(r"/(search|search-jobs|results|login|sign-?in|register|alerts?|saved|talent-?community|"
+                             r"privacy|cookies?|benefits|faq|blog|news|events?|students|locations?|teams?)/?$", re.I)
+
+POLAND_RE = re.compile(r"\b(poland|polska|polen|pologne|polonia|warsaw|warszawa|krak[oó]w|cracow|wroc[lł]aw|"
+                       r"gda[nń]sk|gdynia|sopot|pozna[nń]|[lł][oó]d[zź]|katowice|lublin|szczecin|bydgoszcz|"
+                       r"bia[lł]ystok|rzesz[oó]w|toru[nń]|opole|kielce|olsztyn|gliwice|jawczyce)\b", re.I)
+REMOTE_EU_RE = re.compile(r"remote[^|\n]{0,30}\b(emea|europe|eu)\b|\b(emea|europe)\b[^|\n]{0,15}remote", re.I)
+FOREIGN_RE = re.compile(
+    r"\b(united states|usa|india|bangalore|bengaluru|hyderabad|pune|chennai|mumbai|gurgaon|noida|united kingdom|"
+    r"london|manchester|edinburgh|germany|berlin|munich|frankfurt|hamburg|france|paris|spain|madrid|barcelona|"
+    r"portugal|lisbon|ireland|dublin|netherlands|amsterdam|czech|prague|brno|romania|bucharest|cluj|hungary|"
+    r"budapest|singapore|china|shanghai|beijing|japan|tokyo|canada|toronto|mexico|brazil|philippines|manila|"
+    r"new york|san francisco|seattle|austin|chicago|boston|sweden|stockholm|switzerland|zurich|geneva|italy|milan|"
+    r"belgium|brussels|austria|vienna|denmark|copenhagen|finland|helsinki|norway|oslo|turkey|t[uü]rkiye|istanbul|"
+    r"israel|tel aviv|dubai|egypt|cairo|south africa|australia|sydney|malaysia|kuala lumpur|vietnam|costa rica|"
+    r"colombia|argentina|ukraine|kyiv|lithuania|vilnius|estonia|tallinn|latvia|riga|slovakia|bratislava|greece|"
+    r"athens|bulgaria|sofia|serbia|belgrade|croatia|zagreb)\b", re.I)
+
+
+def generic_job_link(url: str) -> bool:
+    """Şirket kariyer sayfasındaki bir link ilan detayına mı gidiyor?"""
+    return bool(GENERIC_JOB_URL_RE.search(url)) and not GENERIC_SKIP_RE.search(urlsplit(url).path)
+
+
+def card_abroad(card: str) -> bool:
+    """Arama kartı açıkça yurt dışında bir yer söylüyor ve Polonya'dan hiç bahsetmiyorsa True."""
+    return bool(card) and not POLAND_RE.search(card) and bool(FOREIGN_RE.search(card))
+
+
+def in_poland(detail: dict, card: str = "") -> bool:
+    """Konum kapısı: ilanın Polonya'da (ya da Avrupa geneli uzaktan) olduğuna dair kanıt var mı?"""
+    loc = detail.get("location") or ""
+    text = f"{loc}\n{card}\n{(detail.get('description') or '')[:4000]}"
+    return bool(POLAND_RE.search(text) or re.search(r"\bPOL?\b", loc) or REMOTE_EU_RE.search(text))
 JUNK_URL_PARTS = ["/login", "/register", "/signup", "/sign-in", "/employer", "/pracodawcy", "mailto:", "javascript:"]
 
 CARD_JS = """els => els.map(e => {
-  const c = e.closest('li, article, [class*="card" i], [class*="offer" i], [data-test*="offer"], [class*="job-item" i], [class*="result" i]') || e.parentElement;
+  const c = e.closest('li, article, tr, [class*="card" i], [class*="offer" i], [data-test*="offer"], [class*="job-item" i], [class*="result" i]') || e.parentElement;
   return [e.getAttribute('href'), (e.innerText || e.getAttribute('aria-label') || '').trim(), ((c && c.innerText) || '').trim().slice(0, 800)];
 })"""
 
@@ -645,7 +722,8 @@ ALL_JOB_LINKS = {
         "https://hiringcafe.com/saved?feed=all&unread=0&filters=%7B%22locations%22%3A%5B%7B%22id%22%3A%226hk1yZQBoEtHp_8UlzB9%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22Warsaw%22%2C%22short_name%22%3A%22Warsaw%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22Mazovia%22%2C%22short_name%22%3A%2278%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22Poland%22%2C%22short_name%22%3A%22PL%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A52.22977%2C%22lon%22%3A21.01178%7D%7D%2C%22formatted_address%22%3A%22Warsaw%2C+Mazovia%2C+PL%22%2C%22population%22%3A1702139%2C%22options%22%3A%7B%22radius%22%3A25%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%5D%2C%22seniorityLevel%22%3A%5B%22No+Prior+Experience+Required%22%2C%22Entry+Level%22%5D%2C%22excludedLanguageRequirements%22%3A%5B%22polish%22%5D%2C%22languageRequirements%22%3A%5B%22english%22%5D%7D"
     ]
 }
-
+# Şirketlerin kendi kariyer sayfaları (company_sites.py): en sonda, kendi klasöründe.
+ALL_JOB_LINKS["companies"] = [url for _, url in COMPANY_CAREER_SITES]
 
 
 class JobScraper:
@@ -657,7 +735,7 @@ class JobScraper:
         self.max_per_page = max_per_page
         self.use_cursor = use_cursor and not folders and not sites
         self.stats = defaultdict(lambda: {"pages": 0, "cards": 0, "new": 0, "prefiltered": 0, "jobs": 0,
-                                          "card_only": 0, "blocked": 0, "errors": 0})
+                                          "card_only": 0, "blocked": 0, "errors": 0, "abroad": 0})
         self.blocked_streak = defaultdict(int)
         self.stopped_early = False
         self.plan = self._build_plan(folders, sites)
@@ -694,45 +772,63 @@ class JobScraper:
             return False
         _handle_modals(page)
         sel = _lookup(CARD_MODE, page_url) or _lookup(CARD_SELECTORS, page_url)
+        if sel:
+            try:
+                page.wait_for_selector(sel, timeout=15000 if any(s in page_url for s in SLOW_SITES) else 6000)
+            except Exception:
+                pass
+            return True
+        # Şirket kariyer sayfası (genel mod): çoğu SPA, ilan linklerini birkaç saniye sonra çizer.
         try:
-            page.wait_for_selector(sel, timeout=15000 if any(s in page_url for s in SLOW_SITES) else 6000)
+            page.wait_for_load_state("networkidle", timeout=12000)
         except Exception:
             pass
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            try:
+                hrefs = page.eval_on_selector_all("a[href]", "els => els.map(e => e.href)")
+            except Exception:
+                break
+            if any(generic_job_link(h or "") for h in hrefs):
+                break
+            time.sleep(1.0)
         return True
 
     def _grab(self, page, ctx) -> tuple:
         """Ekrandaki kartları topla. (yeni_link, yeni_görülmemiş) sayısı döner."""
-        origin = "{0.scheme}://{0.netloc}".format(urlsplit(page.url))
         new_keys = new_unseen = 0
-        try:
-            items = page.eval_on_selector_all(ctx["sel"], CARD_JS)
-        except Exception:
-            return 0, 0
-        for href, text, card in items:
-            if not href:
+        generic = ctx.get("generic")
+        # Genel modda iframe'lere de bak: bazı şirketler ilan listesini gömülü ATS (Greenhouse vb.) ile gösterir.
+        frames = page.frames if generic else [page.main_frame]
+        for frame in frames:
+            try:
+                items = frame.eval_on_selector_all(ctx["sel"], CARD_JS)
+                base = frame.url or page.url
+            except Exception:
                 continue
-            if href.startswith("//"):
-                full = "https:" + href
-            elif href.startswith("/"):
-                full = origin + href
-            elif href.startswith("http"):
-                full = href
-            else:
-                continue
-            full = full.replace("&amp;", "&")
-            if any(j in full for j in JUNK_URL_PARTS) or (ctx["must"] and not re.search(ctx["must"], full)):
-                continue
-            key = canonical_url(full)
-            if key == ctx["page_key"] or key in ctx["local"] or len(key) < 15:
-                continue
-            ctx["local"].add(key)
-            ctx["st"]["cards"] += 1
-            new_keys += 1
-            if self.state.is_seen(full):
-                continue
-            title = (text or "").split("\n")[0].strip() or (card.split("\n")[0].strip() if card else "")
-            ctx["out"].append({"url": full, "title": title or "Job Opportunity", "card": card})
-            new_unseen += 1
+            for href, text, card in items:
+                if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+                    continue
+                full = urljoin(base, href.replace("&amp;", "&"))  # göreli linkler de (Google: "jobs/results/..")
+                if not full.startswith("http"):
+                    continue
+                if any(j in full for j in JUNK_URL_PARTS) or (ctx["must"] and not re.search(ctx["must"], full)):
+                    continue
+                if generic and not generic_job_link(full):
+                    continue
+                key = canonical_url(full)
+                if key == ctx["page_key"] or key in ctx["local"] or len(key) < 15:
+                    continue
+                ctx["local"].add(key)
+                ctx["st"]["cards"] += 1
+                new_keys += 1
+                if self.state.is_seen(full):
+                    continue
+                title = (text or "").split("\n")[0].strip()
+                if len(title) < 3 or title.lower() in GENERIC_TITLES:
+                    title = card.split("\n")[0].strip() if card else ""
+                ctx["out"].append({"url": full, "title": title or "Job Opportunity", "card": card})
+                new_unseen += 1
         return new_keys, new_unseen
 
     def _scroll_grab(self, page, ctx, scrolls: int = 8) -> tuple:
@@ -793,16 +889,17 @@ class JobScraper:
             return out
 
         sel = _lookup(CARD_SELECTORS, page_url)
-        if not sel:
-            print(f"      ⚠️ [{label}] için kart seçicisi yok.")
-            return []
-        ctx = {"sel": sel, "must": _lookup(DETAIL_URL_RE, page_url), "page_key": canonical_url(page_url),
-               "local": set(), "out": [], "st": st}
+        ctx = {"sel": sel or "a[href]", "must": _lookup(DETAIL_URL_RE, page_url) if sel else None,
+               "generic": not sel, "page_key": canonical_url(page_url), "local": set(), "out": [], "st": st}
         new_keys, new_unseen = self._scroll_grab(page, ctx)
+        if not new_keys and sel:  # site yapısı değişmiş olabilir: genel ilan-linki algılayıcısıyla bir kez dene
+            ctx.update(sel="a[href]", must=None, generic=True)
+            new_keys, new_unseen = self._grab(page, ctx)
         pages, seen_streak = 1, (0 if new_unseen else 1)
         # Sayfa sayfa ilerle: yeni ilan çıkmayınca, üst üste N sayfa tamamen görülmüşse
         # (önceki günlerde taranmış) ya da MAX_PAGES'e ulaşınca dur.
-        max_pages = LINKEDIN_MAX_PAGES if "linkedin.com" in page_url else MAX_PAGES
+        max_pages = (LINKEDIN_MAX_PAGES if "linkedin.com" in page_url
+                     else COMPANY_MAX_PAGES if page_url in COMPANY_BY_URL else MAX_PAGES)
         while new_keys and pages < max_pages and seen_streak < STOP_AFTER_SEEN_PAGES and self._time_left():
             try:
                 if not self._next_page(page, page_url, pages + 1):
@@ -829,19 +926,24 @@ class JobScraper:
             print(f"      ⚠️ [{label}] arama sayfası açılamadı: {str(e).splitlines()[0][:120]}")
             return
 
+        is_company = page_url in COMPANY_BY_URL
+        known_company = COMPANY_BY_URL.get(page_url, "")
         fresh = []
         for cand in candidates:
             reason = self.prefilter(cand["title"])
             if reason:
                 st["prefiltered"] += 1
                 self.state.mark_seen(cand["url"])
+            elif is_company and card_abroad(cand.get("card", "")):
+                st["abroad"] += 1  # kariyer sayfası dünya geneli ilan gösteriyor: detayı açmadan geç
+                self.state.mark_seen(cand["url"])
             else:
                 fresh.append(cand)
         if self.max_per_page:
             fresh = fresh[: self.max_per_page]
         st["new"] += len(fresh)
-        print(f"      📍 [{label}] {len(candidates)} yeni ilan, {len(candidates) - len(fresh)} başlıktan elendi, "
-              f"{len(fresh)} incelenecek.")
+        print(f"      📍 [{label}] {len(candidates)} yeni ilan, {len(candidates) - len(fresh)} başlıktan/konumdan "
+              f"elendi, {len(fresh)} incelenecek.")
 
         for cand in fresh:
             if not self._time_left():
@@ -867,6 +969,13 @@ class JobScraper:
                     detail = _job_from_card(cand) if cand.get("card") else None
                 _sleep()
             self.state.mark_seen(cand["url"])
+            if detail and is_company:
+                if not in_poland(detail, cand.get("card", "")):
+                    st["abroad"] += 1
+                    continue
+                detail["company_site"] = True
+                if known_company and (not detail.get("company_from_ld") or detail.get("company") == "Unknown"):
+                    detail["company"] = known_company
             if detail:
                 st["card_only" if detail.get("card_only") else "jobs"] += 1
                 detail.setdefault("url", cand["url"])
@@ -918,8 +1027,9 @@ class JobScraper:
 
     def print_health_report(self):
         print("\n📊 SİTE SAĞLIK RAPORU")
-        print(f"   {'site':<20}{'sayfa':>6}{'kart':>6}{'yeni':>6}{'elendi':>7}{'detay':>7}{'kart-only':>10}{'engel':>6}{'hata':>5}")
+        print(f"   {'site':<20}{'sayfa':>6}{'kart':>6}{'yeni':>6}{'elendi':>7}{'yurtdışı':>9}{'detay':>7}"
+              f"{'kart-only':>10}{'engel':>6}{'hata':>5}")
         for label, s in sorted(self.stats.items()):
             flag = "  ❌ ilan linki yok" if s["cards"] == 0 else ""
-            print(f"   {label:<20}{s['pages']:>6}{s['cards']:>6}{s['new']:>6}{s['prefiltered']:>7}{s['jobs']:>7}"
-                  f"{s['card_only']:>10}{s['blocked']:>6}{s['errors']:>5}{flag}")
+            print(f"   {label[:19]:<20}{s['pages']:>6}{s['cards']:>6}{s['new']:>6}{s['prefiltered']:>7}"
+                  f"{s['abroad']:>9}{s['jobs']:>7}{s['card_only']:>10}{s['blocked']:>6}{s['errors']:>5}{flag}")

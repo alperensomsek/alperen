@@ -36,6 +36,7 @@ REQUEST_DELAY = (1.0, 2.2)     # Detay sayfaları arası bekleme (siteleri yorma
 MAX_JOBS_PER_SITE = 0          # 0 = sınırsız: bir aramada kaç yeni ilan varsa hepsi incelenir
 MAX_PAGES = int(os.getenv("MAX_PAGES", "10"))  # Her aramada en fazla kaç sonuç sayfası gezilir
 LINKEDIN_MAX_PAGES = 25        # LinkedIn sayfası 10 ilan: 25 sayfa = 250 ilan
+COMPANY_MAX_PAGES = int(os.getenv("COMPANY_MAX_PAGES", "3"))  # Şirket kariyer sayfalarında (~200 şirket) en fazla sayfa
 STOP_AFTER_SEEN_PAGES = 2      # Üst üste bu kadar sayfanın tamamı önceden görülmüşse daha derine inme
 RUN_TIME_BUDGET_MIN = float(os.getenv("RUN_TIME_BUDGET_MIN", "120"))  # Süre dolarsa kaldığı yerden devam eder
 

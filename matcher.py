@@ -45,6 +45,44 @@ SKILL_ALIASES = {"auditing": "audit", "excel macros": "vba", "macros": "vba", "g
 IGNORED_FOR_COVERAGE = {"english", "polish", "german", "turkish", "microsoft office", "reporting", "ai", "api", "training"}
 
 
+# Başlıktaki ana alan CV'de yoksa (ör. "Payroll Specialist") anahtar kelime puanı yanıltıcı olur:
+# puan tavanlanır ve mektup bu açığı dürüstçe söyler. (desen, mektupta kullanılacak ifade)
+GAP_DOMAINS = [
+    (r"payroll", "payroll"),
+    (r"accounts? (payable|receivable)|\bap\b|\bar\b|accountant|accounting|bookkeep\w*|general ledger|r2r|p2p|o2c",
+     "accounting"),
+    (r"\btax\b|\bvat\b", "tax"),
+    (r"treasury", "treasury"),
+    (r"recruit\w*|talent acquisition|sourcer", "recruitment"),
+    (r"\bhr\b|human resources|people partner", "HR"),
+    (r"\bsales\b|account executive|business development", "sales"),
+    (r"marketing|\bseo\b|social media", "marketing"),
+    (r"procurement|purchas\w*|buyer|sourcing", "procurement"),
+    (r"logistic\w*|supply chain|warehouse|transport", "logistics"),
+    (r"\blegal\b|lawyer|paralegal|counsel", "legal"),
+    (r"customer (service|support|care)|call cent\w*|helpdesk|help desk", "customer support"),
+]
+SCORE_CAP_ON_GAP = 72  # baraj (70) üstünde kalır, gönderilir ama "güçlü uyum" görünmez
+
+
+# Başlıkta CV'nin çekirdek alanı da varsa ("Logistics Data Analyst", "Tax Compliance Analyst") açık sayılmaz.
+CORE_IN_TITLE = re.compile(r"\b(data|compliance|risk|audit\w*|automation|quality|process|python|bi|reporting|"
+                           r"kyc|aml|fraud|controls?)\b", re.I)
+
+
+def domain_gap(title: str) -> str:
+    """Başlıktaki ana alan CV'de yoksa o alanın adı ('payroll'), yoksa boş string."""
+    t = (title or "").lower()
+    if CORE_IN_TITLE.search(t):
+        return ""
+    return next((name for pat, name in GAP_DOMAINS if re.search(pat, t)), "")
+
+
+def gap_pattern(gap: str):
+    pat = next((p for p, name in GAP_DOMAINS if name == gap), None)
+    return re.compile(pat, re.I) if pat else None
+
+
 def extract_skills(text: str) -> set:
     found = set()
     for skill, pat in SKILL_PATTERNS.items():
@@ -61,6 +99,11 @@ REQ_HINT = re.compile(
 )
 REQ_SKIP = re.compile(r"\b(we offer|benefit|salary|bonus|insurance|multisport|medical|holiday|office|"
                       r"apply|recruitment|equal opportunit|privacy|gdpr consent|about us|who we are)\b", re.I)
+
+
+# "SAP is a plus" gibi artı maddeler mektupta "şartınız" diye alıntılanmaz.
+NICE_TO_HAVE = re.compile(r"nice to have|is a plus|would be a plus|an? (advantage|asset|plus)\b|preferred|bonus",
+                          re.I)
 
 
 def extract_requirements(desc: str, limit: int = 40) -> list:
@@ -120,29 +163,39 @@ class JobMatcher:
         order = np.argsort(-(self.ach_vecs @ job_vec + np.array(P.ACHIEVEMENT_WEIGHTS)))
         return [P.ACHIEVEMENTS[i] for i in order[:n]]
 
-    def match_requirements(self, job: dict, k: int = 3, min_sim: float = 0.62) -> list:
+    def match_requirements(self, job: dict, k: int = 3, min_sim: float = 0.60, skip=None,
+                           strong_sim: float = 0.72, tag_bonus: float = 0.06) -> list:
         """İlan metnindeki şart cümlelerini CV kanıtlarıyla eşleştirir.
 
-        Dönüş: [(ilandan_alıntı, kanıt_metni), ...] — her kanıt en fazla bir kez, benzerliği eşiğin üstünde olanlar.
+        Dönüş: [(ilandan_alıntı, birinci_şahıs_kanıt), ...] — her kanıt en fazla bir kez, benzerliği eşiğin
+        üstünde olanlar. `skip` (regex) eşleşen şartlar atlanır: CV'nin cevaplayamadığı şartı (ör. "payroll")
+        zayıf bir kanıtla eşleştirmek hiç eşleştirmemekten kötüdür.
         """
         if self.model is None:
             return []
-        reqs = extract_requirements(job.get("description") or "")
+        reqs = [r for r in extract_requirements(job.get("description") or "")
+                if not (skip and skip.search(r)) and not NICE_TO_HAVE.search(r)]
         if not reqs:
             return []
         rv = self._embed(reqs)
         ev = self._embed(P.EVIDENCE_SHORT)
         sims = rv @ ev.T
+        # bge-small benzerlikleri dar bir aralıkta: tek başına eşik "payroll"u otomasyon kanıtıyla eşleştiriyor.
+        # Konu kelimesi örtüşmesi (EVIDENCE_TAGS) puana eklenir; örtüşme yoksa çok yüksek benzerlik şart.
+        overlap = np.array([[min(2, sum(bool(re.search(rf"\b{re.escape(t)}", r.lower())) for t in tags))
+                             for tags in P.EVIDENCE_TAGS] for r in reqs], dtype=np.float32)
+        valid = (sims >= min_sim) & ((overlap > 0) | (sims >= strong_sim))
+        score = np.where(valid, sims + tag_bonus * overlap, -1.0)
         pairs, used_r, used_e = [], set(), set()
-        for flat in np.argsort(-sims, axis=None):
-            r, e = divmod(int(flat), sims.shape[1])
-            if sims[r, e] < min_sim or len(pairs) >= k:
+        for flat in np.argsort(-score, axis=None):
+            r, e = divmod(int(flat), score.shape[1])
+            if score[r, e] < 0 or len(pairs) >= k:
                 break
             if r in used_r or e in used_e:
                 continue
             used_r.add(r)
             used_e.add(e)
-            pairs.append((reqs[r], P.EVIDENCE_SHORT[e]))
+            pairs.append((reqs[r], P.EVIDENCE_FIRST[e]))
         return pairs
 
     def best_task(self, job: dict, exclude: set, verb_re) -> str:
@@ -193,6 +246,9 @@ class JobMatcher:
             score -= 5  # sadece kart bilgisi var: daha temkinli
         if not role:
             score = min(score, 64)
+        gap = domain_gap(title)
+        if gap:
+            score = min(score, SCORE_CAP_ON_GAP)
         score = int(round(max(0, min(score, 99))))
 
         reasons = []
@@ -206,8 +262,11 @@ class JobMatcher:
             reasons.append("Turkish")
         if required_years is not None:
             reasons.append(f"asks {required_years}+ yrs")
+        if gap:
+            reasons.append(f"no direct {gap} experience (capped)")
         return {
             "match_score": score,
+            "gap": gap,
             "semantic": None if sim is None else round(sim, 3),
             "matched_skills": matched,
             "missing_skills": missing,
